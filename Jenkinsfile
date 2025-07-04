@@ -21,7 +21,7 @@ pipeline {
         stage("deploy") {
             steps {
                 script {
-                    def dockerCmd = "docker run -d -p 3080:3080 --name okoro/dev-ops-react-node:1.0"
+                    def dockerCmd = "docker run -d -p 3080:3080 okoro/dev-ops-react-node:1.0"
                     echo "Deploying the application..."
                     sshagent(['ec2-server-key']) {
                         sh "ssh -o StrictHostKeyChecking=no ec2-user@52.35.238.86 ${dockerCmd}"
