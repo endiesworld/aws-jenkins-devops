@@ -1,30 +1,50 @@
-#!/usr/bin.env groovy
+#!/usr/bin/env groovy
 
-pipeline {   
+library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
+    $class: 'GitSCMSource',              // use Git source
+    id: 'jenkins-shared-library',        // unique ID for tracking
+    remote: 'https://github.com/endiesworld/jenkins-shared-library.git',
+    credentialsId: 'github-PAT',         // your GitHub token in Jenkins
+    // traits: [
+    //     [$class: 'jenkins.plugins.git.traits.BranchDiscoveryTrait']  // This is the fix!
+    // ]
+])
+
+pipeline {
     agent any
+    tools {
+        maven 'maven-3.9'
+    }
+    environment {
+        IMAGE_NAME = 'okoro/demo-app:java-maven-1.0'
+    }
     stages {
-        stage("test") {
+        stage('build app') {
             steps {
-                script {
-                    echo "Testing the application..."
-
-                }
+                echo 'building application jar...'
+                buildJar()
             }
         }
-        stage("build") {
+        stage('build image') {
             steps {
                 script {
-                    echo "Building the application..."
+                    echo 'building the docker image...'
+                    buildImage(env.IMAGE_NAME)
+                    dockerLogin()
+                    dockerPush(env.IMAGE_NAME)
                 }
             }
-        }
-
+        } 
         stage("deploy") {
             steps {
                 script {
-                    echo "Deploying the application..."
+                    echo 'deploying docker image to EC2...'
+                    def dockerCmd = "docker run -p 8080:8080 -d ${IMAGE_NAME}"
+                    sshagent(['ec2-server-key']) {
+                        sh "ssh -o StrictHostKeyChecking=no ec2-user@52.35.238.86 ${dockerCmd}"
+                    }
                 }
-            }
-        }               
+            }               
+        }
     }
-} 
+}
