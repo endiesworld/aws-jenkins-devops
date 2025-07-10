@@ -68,6 +68,7 @@ pipeline {
                                      passwordVariable: 'PASS', 
                                      usernameVariable: 'USER') 
                 ]) {
+                    sh 'echo Commiting version update to github...'
 					sh 'git config --global user.email "jenkins@example"'
 					sh 'git config --global user.name "Jenkins CI"'
 					sh 'git status'
