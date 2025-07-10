@@ -16,7 +16,7 @@ pipeline {
         maven 'maven-3.9'
     }
     environment {
-        IMAGE_NAME = 'okoro/demo-app:java-maven-1.0'
+        IMAGE_NAME = 'okoro/demo-app:java-maven-1.1'
     }
     stages {
         stage('build app') {
@@ -39,7 +39,7 @@ pipeline {
             steps {
                 script {
                     echo 'deploying docker image to EC2...'
-                    def shellScript = "bash ./server-cmds.sh"
+                    def shellScript = "bash ./server-cmds.sh ${IMAGE_NAME}"
                     sshagent(['ec2-server-key']) {
                         sh "scp server-cmds.sh ec2-user@52.35.238.86:/home/ec2-user/"
                         sh "scp docker-compose.yaml ec2-user@52.35.238.86:/home/ec2-user/"
