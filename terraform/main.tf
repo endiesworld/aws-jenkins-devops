@@ -1,150 +1,151 @@
+
 provider "aws" {
-    region = "us-west-2"
+    region = var.region
 }
 
-variable vpc_cidr_block {}
-variable subnet_cidr_block {}
-variable avail_zone {}
-variable env_prefix {}
-variable my_IP {}
-variable instance_type {
-    default = "t2.micro" 
-}
-variable key_name {
-    default = "jenkins-TF-EC2-key" # Key pair name to be created in AWS
-    description = "Name of the key pair to be used for SSH access to the EC2 instance"
-    type = string
-}
-variable public_key_path {
-    default = "~/.ssh/id_rsa.pub" # Replace with the path to your public key
+# --- Networking: default VPC + choose one default subnet (indexable) ---
+data "aws_vpc" "default" {
+    default = true
 }
 
-
-resource "aws_vpc" "myapp-vpc" {
-    cidr_block = var.vpc_cidr_block
-    tags = {
-        Name = "${var.env_prefix}-vpc"
+data "aws_subnets" "default" {
+    filter {
+        name   = "vpc-id"
+        values = [data.aws_vpc.default.id]
     }
 }
 
-resource "aws_subnet" "myapp-subnet-1" {
-    vpc_id = aws_vpc.myapp-vpc.id
-    cidr_block = var.subnet_cidr_block
-    availability_zone = var.avail_zone
-    tags = {
-        Name = "${var.env_prefix}-subnet-1"
-    }
+data "aws_subnet" "chosen" {
+    id = data.aws_subnets.default.ids[var.subnet_index]
 }
 
-resource "aws_internet_gateway" "myapp-igw" {
-    vpc_id = aws_vpc.myapp-vpc.id
-    tags = {
-        Name = "${var.env_prefix}-igw"
-    }
-}
+# --- Security Group for App EC2 ---
+resource "aws_security_group" "app_sg" {
+    name        = "${var.env_prefix}-app-sg"
+    description = "Security group for app EC2 managed by docker-compose"
+    vpc_id      = data.aws_vpc.default.id
 
-resource "aws_route_table" "myapp-route-table" {
-    vpc_id = aws_vpc.myapp-vpc.id
-    route {
-        cidr_block = "0.0.0.0/0"
-        gateway_id = aws_internet_gateway.myapp-igw.id
-    }
-    tags = {
-        Name = "${var.env_prefix}-route-table"
-    }
-}
-
-# resource " aws_default_route_table" "myapp-default-route-table" {
-#     default_route_table_id = aws_vpc.myapp-vpc.default_route_table_id
-#     route {
-#         cidr_block = "0.0.0.0/0"
-#         gateway_id = aws_internet_gateway.myapp-igw.id
-#     }
-#     tags = {
-#         Name = "${var.env_prefix}-default-route-table"
-#     }
-# }
-
-resource "aws_route_table_association" "myapp-subnet-association" {
-    subnet_id = aws_subnet.myapp-subnet-1.id
-    route_table_id = aws_route_table.myapp-route-table.id
-}
-
-resource "aws_security_group" "myapp-sg" {
-    vpc_id = aws_vpc.myapp-vpc.id
-    name = "${var.env_prefix}-sg"
-    description = "Security group for ${var.env_prefix} environment"
-    
-    ingress {
-        from_port = 22
-        to_port = 22
-        protocol = "tcp"
-        cidr_blocks = [var.my_IP] # Replace with your IP address
-        description = "SSH access"
+    # SSH only from Jenkins or your trusted CIDRs
+    dynamic "ingress" {
+        for_each = var.allowed_ssh_cidrs
+        content {
+        description = "SSH from trusted CIDR"
+        from_port   = 22
+        to_port     = 22
+        protocol    = "tcp"
+        cidr_blocks = [ingress.value]
+        }
     }
 
-    ingress {
-        from_port = 8080
-        to_port = 8080
-        protocol = "tcp"
-        cidr_blocks = ["0.0.0.0/0"] # Replace with your IP address
-        description = "HTTP access"
+    # HTTP (80) as needed
+    dynamic "ingress" {
+        for_each = var.allowed_http_cidrs
+        content {
+        description = "HTTP from allowed CIDR"
+        from_port   = 80
+        to_port     = 80
+        protocol    = "tcp"
+        cidr_blocks = [ingress.value]
+        }
+    }
+
+    # HTTPS (443) as needed
+    dynamic "ingress" {
+        for_each = var.allowed_https_cidrs
+        content {
+        description = "HTTPS from allowed CIDR"
+        from_port   = 443
+        to_port     = 443
+        protocol    = "tcp"
+        cidr_blocks = [ingress.value]
+        }
     }
 
     egress {
-        from_port = 0
-        to_port = 0
-        protocol = "-1"
+        description = "All egress"
+        from_port   = 0
+        to_port     = 0
+        protocol    = "-1"
         cidr_blocks = ["0.0.0.0/0"]
-        description = "Allow all outbound traffic"
     }
+
     tags = {
-        Name = "${var.env_prefix}-sg"
+        Name = "${var.env_prefix}-app-sg"
     }
 }
 
-data "aws_ami" "latest-amazon-linux-image" {
+# --- IAM Role/Instance Profile (SSM + ECR read) ---
+data "aws_iam_policy" "ssm_core" {
+    arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+data "aws_iam_policy" "ecr_read_only" {
+    arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+resource "aws_iam_role" "app_ec2_role" {
+    name = "${var.env_prefix}-app-ec2-role"
+    assume_role_policy = jsonencode({
+        Version = "2012-10-17",
+        Statement = [{
+        Effect = "Allow",
+        Principal = { Service = "ec2.amazonaws.com" },
+        Action   = "sts:AssumeRole"
+        }]
+    })
+    tags = { Name = "${var.env_prefix}-app-ec2-role" }
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+    role       = aws_iam_role.app_ec2_role.name
+    policy_arn = data.aws_iam_policy.ssm_core.arn
+}
+
+resource "aws_iam_role_policy_attachment" "ecr_ro" {
+    role       = aws_iam_role.app_ec2_role.name
+    policy_arn = data.aws_iam_policy.ecr_read_only.arn
+}
+
+resource "aws_iam_instance_profile" "app_profile" {
+    name = "${var.env_prefix}-app-profile"
+    role = aws_iam_role.app_ec2_role.name
+}
+
+# --- AMI (Amazon Linux 2 for simple Docker install) ---
+data "aws_ami" "amzn2" {
     most_recent = true
-    owners = ["amazon"]
+    owners      = ["amazon"]
     filter {
-        name = "name"
-        values = ["amzn2-ami-hvm-2*-x86_64-gp2"]
-    }
-    filter {
-        name = "virtualization-type"
-        values = ["hvm"]
+        name   = "name"
+        values = ["amzn2-ami-hvm-*-x86_64-gp2"]
     }
 }
 
-# output "aws_ami_id" {
-#     value = data.aws_ami.latest-amazon-linux-image.id 
-# }
-
-# resource "aws_key_pair" "ssh-key" {
-#     key_name = var.key_name
-#     public_key = file(var.public_key_path)
-# }
-
-resource "aws_instance" "myapp-server" {
-    ami = data.aws_ami.latest-amazon-linux-image.id
-    instance_type = var.instance_type
-
-    key_name = var.key_name
-
-    availability_zone = var.avail_zone
-    subnet_id = aws_subnet.myapp-subnet-1.id
-    vpc_security_group_ids = [aws_security_group.myapp-sg.id]
-
+# --- App EC2 Instance ---
+resource "aws_instance" "app_server" {
+    ami                         = data.aws_ami.amzn2.id
+    instance_type               = var.instance_type
+    subnet_id                   = data.aws_subnet.chosen.id
+    vpc_security_group_ids      = [aws_security_group.app_sg.id]
     associate_public_ip_address = true
 
-    user_data = file("entry_script.sh") # Replace with your user data script path
-    
-    user_data_replace_on_change = true
-    tags = {
-        Name = "${var.env_prefix}-server"
-    }
-}
+    # Reuse an existing key pair so Jenkins can SSH and push compose files
+    key_name = var.key_name
 
-output "ec2_srver_public_ip" {
-    value = aws_instance.myapp-server.public_ip
+    iam_instance_profile = aws_iam_instance_profile.app_profile.name
+
+    user_data = file("${path.module}/user_data.sh")
+
+    root_block_device {
+        volume_type = "gp3"
+        volume_size = var.root_volume_size
+        encrypted   = true
+    }
+
+    tags = {
+        Name        = "${var.env_prefix}-app-server"
+        Environment = var.env_prefix
+        ManagedBy   = "Terraform"
+        Role        = "AppHost"
+    }
 }
