@@ -1,116 +1,120 @@
 #!/usr/bin/env groovy
 
-@Library('jenkins-shared-library@main')  // Load the shared library
-// library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
-//     $class: 'GitSCMSource',              // use Git source
-//     id: 'jenkins-shared-library',        // unique ID for tracking
-//     remote: 'https://github.com/endiesworld/jenkins-shared-library.git',
-//     credentialsId: 'github-PAT',         // your GitHub token in Jenkins
-//     // traits: [
-//     //     [$class: 'jenkins.plugins.git.traits.BranchDiscoveryTrait']  // This is the fix!
-//     // ]
-// ])
+@Library('jenkins-shared-library@main') _  // load your shared library (buildJar, buildImage, dockerLogin, dockerPush)
 
 pipeline {
-    agent any
-    tools {
-        maven 'maven-3.9.11'
-    }
-   
-    stages {
-        stage("init"){
-			steps{
-				script{
-					
-					sh 'mvn build-helper:parse-version versions:set \
-					-DnewVersion=\\\${parsedVersion.majorVersion}.\\\${parsedVersion.minorVersion}.\\\${parsedVersion.nextIncrementalVersion} \
-					versions:commit'
-					def matcher = readFile('pom.xml') =~ '<version>(.+?)</version>'
-					def version = matcher ? matcher[0][1] : 'unknown'
-					env.IMAGE_NAME = "okoro/demo-app:java-maven-${version}-${BUILD_NUMBER}"
-				}
-				
-			}
-		}
-        stage('build app') {
-            steps {
-                echo 'building application jar...'
-                buildJar()
-            }
-        }
-        stage('build image') {
-            steps {
-                script {
-                    echo 'building the docker image...'
-                    buildImage(env.IMAGE_NAME)
-                    dockerLogin()
-                    dockerPush(env.IMAGE_NAME)
-                }
-            }
-        }
-        stage("provision server") {
-            environment {
-                AWS_ACCESS_KEY_ID = credentials('jenkins_aws_access_key_id')
-                AWS_SECRET_ACCESS_KEY = credentials('jenkins-aws_secret_access_key')
-                TF_VAR_env_prefix = 'test'
-            }
-            steps {
-                script {
-                dir('terraform') {
-                    sh "terraform init"
-                    sh "terraform apply --auto-approve"
-                    EC2_PUBLIC_IP = sh(
-                    script: "terraform output ec2-public_ip",
-                    returnStdout: true
-                    ).trim()
-                }
-                }
-            }
-        }
-        stage("deploy") {
-            environment {
-                DOCKER_CREDS = credentials('docker-hub-repo')
-            }
-            steps {
-                script {
-                echo "waiting for EC2 server to initialize"
-                sleep(time: 120, unit: "SECONDS")
+  agent any
 
-                echo 'deploying docker image to EC2...'
-                echo "${EC2_PUBLIC_IP}"
-                
-                def shellCmd = "bash ./server-cmds.sh ${IMAGE_NAME} ${DOCKER_CREDS_USR} ${DOCKER_CREDS_PSW}"
-                def ec2Instance = "ec2-user@${EC2_PUBLIC_IP}"
+  tools {
+    maven 'maven-3.9.11'
+  }
 
-                sshagent(['server-ssh-key']) {
-                    sh "scp -o StrictHostKeyChecking=no server-cmds.sh ${ec2Instance}:/home/ec2-user"
-                    sh "scp -o StrictHostKeyChecking=no docker-compose.yaml ${ec2Instance}:/home/ec2-user"
-                    sh "ssh -o StrictHostKeyChecking=no ${ec2Instance} ${shellCmd}"
-                }
-                }
-            }               
+  options {
+    // keep logs readable; add any you like (timestamps, durabilityHint, etc.)
+    ansiColor('xterm')
+    timeout(time: 60, unit: 'MINUTES')
+  }
+
+  environment {
+    // global env if you want; can be overridden in stages
+  }
+
+  stages {
+
+    stage('init') {
+      steps {
+        script {
+          // bump version in pom.xml and compute image tag
+          sh '''
+            mvn build-helper:parse-version versions:set \
+              -DnewVersion=\\${parsedVersion.majorVersion}.\\${parsedVersion.minorVersion}.\\${parsedVersion.nextIncrementalVersion} \
+              versions:commit
+          '''
+          def matcher = (readFile('pom.xml') =~ '<version>(.+?)</version>')
+          def version = matcher ? matcher[0][1] : 'unknown'
+          env.IMAGE_NAME = "okoro/demo-app:java-maven-${version}-${BUILD_NUMBER}"
+          echo "IMAGE_NAME: ${env.IMAGE_NAME}"
         }
-        // stage("commit version update"){
-		// 	steps{
-        //             withCredentials([
-        //             usernamePassword(credentialsId: 'github-PAT', 
-        //                              passwordVariable: 'PASS', 
-        //                              usernameVariable: 'USER') 
-        //         ]) {
-        //             sh 'echo Commiting version update to github...'
-		// 			sh 'git config --global user.email "jenkins@example"'
-		// 			sh 'git config --global user.name "Jenkins CI"'
-		// 			sh 'git status'
-		// 			sh 'git branch'
-		// 			sh 'git config --list'
-        //             sh "git remote set-url origin https://${USER}:${PASS}@github.com/endiesworld/aws-jenkins-devops.git"
-		// 			sh 'git add .'
-		// 			sh 'git commit -m "CI: Update version in pom.xml file"'
-		// 			sh 'git push origin HEAD:refs/heads/jenkins-jobs'
-					
-        //         }
-            
-        //     }
-		// }
+      }
     }
+
+    stage('build app') {
+      steps {
+        echo 'Building application JAR...'
+        script {
+          buildJar()  // from shared library
+        }
+      }
+    }
+
+    stage('build image') {
+      steps {
+        script {
+          echo 'Building & pushing Docker image...'
+          buildImage(env.IMAGE_NAME)  // from shared library
+          dockerLogin()               // from shared library
+          dockerPush(env.IMAGE_NAME)  // from shared library
+        }
+      }
+    }
+
+    stage('provision server') {
+      environment {
+        // If these two are stored as Secret Text creds, this works.
+        // (Alternatively use withCredentials + AWS Credentials binding.)
+        AWS_ACCESS_KEY_ID     = credentials('jenkins_aws_access_key_id')
+        AWS_SECRET_ACCESS_KEY = credentials('jenkins-aws_secret_access_key')
+        TF_VAR_env_prefix     = 'test'
+      }
+      steps {
+        dir('terraform') {
+          sh 'terraform init -input=false'
+          sh 'terraform apply -auto-approve -input=false'
+
+          script {
+            // Use -raw to avoid quotes/newlines; ensure output name matches your tf output variable
+            env.EC2_PUBLIC_IP = sh(
+              script: "terraform output -raw ec2_public_ip",
+              returnStdout: true
+            ).trim()
+            echo "Provisioned EC2_PUBLIC_IP=${env.EC2_PUBLIC_IP}"
+            if (!env.EC2_PUBLIC_IP) {
+              error('Terraform did not return ec2_public_ip output')
+            }
+          }
+        }
+      }
+    }
+
+    stage('deploy') {
+      environment {
+        // Jenkins will expose DOCKER_CREDS_USR / DOCKER_CREDS_PSW automatically
+        DOCKER_CREDS = credentials('docker-hub-repo')
+      }
+      steps {
+        script {
+          if (!env.EC2_PUBLIC_IP) {
+            error('EC2_PUBLIC_IP not set; deploy cannot continue.')
+          }
+
+          echo 'Waiting for EC2 server to finish cloud-init / user_data...'
+          sleep(time: 120, unit: 'SECONDS')
+
+          echo "Deploying ${env.IMAGE_NAME} to ${env.EC2_PUBLIC_IP} via SSH..."
+          def ec2Instance = "ec2-user@${env.EC2_PUBLIC_IP}"
+          def shellCmd    = "bash ./server-cmds.sh ${env.IMAGE_NAME} ${DOCKER_CREDS_USR} ${DOCKER_CREDS_PSW}"
+
+          sshagent(['server-ssh-key']) {
+            sh "scp -o StrictHostKeyChecking=no server-cmds.sh ${ec2Instance}:/home/ec2-user/"
+            sh "scp -o StrictHostKeyChecking=no docker-compose.yaml ${ec2Instance}:/home/ec2-user/"
+            sh "ssh -o StrictHostKeyChecking=no ${ec2Instance} '${shellCmd}'"
+          }
+        }
+      }
+    }
+
+    // Optional: if you later want to push version bumps back to Git, re-enable and
+    // ensure the branch and PAT scopes are correct.
+    // stage('commit version update') { ... }
+  }
 }

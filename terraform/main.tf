@@ -1,3 +1,14 @@
+terraform {
+  required_version = ">= 0.12"
+  backend "s3" {
+    bucket = "jenkins-bucket-project-adaobi"
+    key = "terraform/state.tfstate"
+    region = "us-west-2"
+  }
+}
+
+
+
 
 provider "aws" {
     region = var.region
