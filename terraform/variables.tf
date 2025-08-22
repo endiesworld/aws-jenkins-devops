@@ -36,6 +36,10 @@ variable "my_IP" {
     default = "108.35.175.17/32"
 }
 
+variable "jenkins_ip"{
+    default = "35.92.67.248/32"
+}
+
 variable "allowed_ssh_cidrs" {
     description = "CIDRs allowed to SSH (22) into the app EC2 (e.g., Jenkins public /32)"
     type        = list(string)
