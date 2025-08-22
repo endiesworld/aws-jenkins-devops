@@ -1,22 +1,12 @@
 #!/usr/bin/env groovy
 
-@Library('jenkins-shared-library@main') _  // load your shared library (buildJar, buildImage, dockerLogin, dockerPush)
+@Library('jenkins-shared-library') _  // load your shared library (buildJar, buildImage, dockerLogin, dockerPush)
 
 pipeline {
   agent any
 
   tools {
     maven 'maven-3.9.11'
-  }
-
-  options {
-    // keep logs readable; add any you like (timestamps, durabilityHint, etc.)
-    ansiColor('xterm')
-    timeout(time: 60, unit: 'MINUTES')
-  }
-
-  environment {
-    // global env if you want; can be overridden in stages
   }
 
   stages {
